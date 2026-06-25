@@ -1,6 +1,7 @@
 use std::{any::TypeId, collections::LinkedList};
 
-use anarchy::{Resource, ResourceMeta, Schedule, ScheduleID, ScheduleTile, Scheduler, System, World, macros::{Getters, GettersMut}};
+use anarchy::{DeltaTime, FlexLocalId, Resource, ResourceMeta, Schedule, ScheduleID, ScheduleTile, Scheduler, System, World, macros::{Getters, GettersMut}};
+use chrono::Utc;
 use magician_vgpu::RenderFrame;
 use mutual::DashSet;
 use winit::event_loop::EventLoop;
@@ -140,6 +141,7 @@ impl App {
      }
 
     pub(crate) fn render(&mut self) -> anyhow::Result<()> {
+        let start = Utc::now();
         let Some(vgpu) = self.world
             .get_resource_ref::<Graphics>() 
             else { return Ok(()) };
@@ -186,8 +188,16 @@ impl App {
                 .expect("Frame lost")
         };
 
-        // finalize frame and mark complete
+        // finalize frame
         frame.submit(&vgpu);
+
+        // record delta time
+        let total_runtime = Utc::now().signed_duration_since(start).to_std().map(|a| a.as_nanos()).unwrap_or(0);
+        let deltatime = total_runtime as f32 / 1_000_000_000.0;
+        self.world.get_resource_ref::<DeltaTime>()
+            .expect("DeltaTime was lost!")
+            .set(FlexLocalId::Schedule(self.render_schedule_id), deltatime);
+
         Ok(())
     }
 }
