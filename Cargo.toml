@@ -1,0 +1,20 @@
+[package]
+name = "cell"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anarchy = { path = "../anarchy" }
+mutual = "1.0.2"
+magician-vgpu = { path = "../shader_magician/magician-vgpu" }
+
+anyhow = "1.0.102"
+winit = { version = "0.30", features = ["android-native-activity"] }
+env_logger = "0.11"
+wgpu = "29.0"
+pollster = "0.4"
+derive_more = "2.1.1"
+
+egui = "0.34"
+egui-wgpu = "0.34"
+egui-winit = "0.34"
