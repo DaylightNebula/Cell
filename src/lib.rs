@@ -1,6 +1,6 @@
-use std::{any::TypeId, collections::LinkedList};
+use std::any::TypeId;
 
-use anarchy::{DeltaTime, FlexLocalId, Resource, ResourceMeta, Schedule, ScheduleID, ScheduleTile, Scheduler, System, World, macros::{Getters, GettersMut}};
+use anarchy::{DeltaTime, FlexLocalId, Resource, ResourceMeta, Schedule, ScheduleID, ScheduleTile, Scheduler, System, World, execute_schedule_sync, macros::{Getters, GettersMut}};
 use chrono::Utc;
 use magician_vgpu::RenderFrame;
 use mutual::DashSet;
@@ -154,32 +154,14 @@ impl App {
                 .store(frame);
         }
 
-        // setup tiles list
-        let mut next_render_schedule = Schedule::new_empty();
-        let prev_render_schedule = self.render_schedule
-            .take()
-            .expect("Render schedule has gone missing");
-        let mut tiles = LinkedList::new();
-        if prev_render_schedule.has_next_startup() {
-            while let Some(tile) = prev_render_schedule.next_startup() {
-                tiles.push_back(tile);
-            }
-
-            while let Some(item) = prev_render_schedule.next_update() {
-                next_render_schedule.add_new(item.tile.clone());
-            }
-        } else {
-            while let Some(tile) = prev_render_schedule.next_update() {
-                tiles.push_back(tile);
-            }
-        }
-
-        // execute previous tiles
-        tiles.into_iter().for_each(|tile| {
-            tile.tile.execute(&self.world, &(), self.render_schedule_id, tile.first_run);
-            if !tile.dont_save { next_render_schedule.post_run_add(tile.tile.clone(), prev_render_schedule.total_runtime); }
-        });
-        self.render_schedule = Some(next_render_schedule);
+        self.render_schedule = Some(execute_schedule_sync(
+            self.render_schedule
+                .take()
+                .expect("Render schedule has gone missing"),
+            self.render_schedule_id,
+            &self.world,
+            &()
+        ));
 
         let frame = {
             self.world.get_resource_mut::<Frame>()
