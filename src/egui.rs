@@ -1,5 +1,5 @@
 use anarchy::{Event, EventSystemMinIDTracker, Res, ResMut, macros::{Resource, system}};
-use magician_vgpu::{LoadOp, PassAttachment, PassTarget, StoreOp, glam::Vec4};
+use magician_vgpu::{LoadOp, PassAttachment, PassTarget, StoreOp};
 
 use crate::{App, Frame, Graphics, Plugin, WindowEvent};
 
@@ -91,7 +91,7 @@ fn end_egui_frame(
             &[
                 PassAttachment {
                     target: PassTarget::PassOutput,
-                    load_op: LoadOp::Clear(Vec4::new(0.1, 0.2, 0.3, 1.0)),
+                    load_op: LoadOp::Load,
                     store_op: StoreOp::Store
                 }
             ], 

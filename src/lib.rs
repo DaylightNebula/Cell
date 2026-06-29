@@ -1,7 +1,8 @@
 use std::any::TypeId;
 
-use anarchy::{DeltaTime, FlexLocalId, Resource, ResourceMeta, Schedule, ScheduleID, ScheduleTile, Scheduler, System, World, execute_schedule_sync, macros::{Getters, GettersMut}};
+use anarchy::{DeltaTime, FlexLocalId, Res, Resource, ResourceMeta, Schedule, ScheduleID, ScheduleTile, Scheduler, System, World, execute_schedule_sync, macros::{Getters, GettersMut, system}};
 use chrono::Utc;
+use ::egui::Window;
 use magician_vgpu::RenderFrame;
 use mutual::DashSet;
 use winit::event_loop::EventLoop;
@@ -33,14 +34,27 @@ pub struct App {
 impl App {
     /// Create a new `App` instance.
     pub fn new() -> Self {
-        App {
+        #[allow(unused_mut)] // used by non-default features
+        let mut app = App {
             primary_schedule_id: ScheduleID { id: "APP", tick_rate: 60, max_threads: 4 },
             primary_schedule: Some(Schedule::new_empty()),
             render_schedule_id: ScheduleID { id: "RENDER", tick_rate: 0, max_threads: 1 },
             render_schedule: Some(Schedule::new_empty()),
             added_plugins: DashSet::default(),
             world: World::new()
+        };
+
+        #[cfg(feature = "auto-egui")]
+        {
+            app = app.add_plugin(EguiPlugin);
         }
+
+        #[cfg(feature = "dbg-schedules")]
+        {
+            app = app.on_render_update(dbg_schedules);
+        }
+    
+        return app;
     }
 
     /// Add a plugin to this `App`.  The plugins build function is called immeidately.
@@ -182,4 +196,18 @@ impl App {
 
         Ok(())
     }
+}
+
+#[system]
+fn dbg_schedules(
+    egui: Res<EguiCtx>,
+    delta_time: Res<DeltaTime>
+) {
+    Window::new("Schedules Debug").show(&egui.context, |ui| {
+        ui.label("FPS Counters");
+        for (id, delta_time) in delta_time.iter_ref() {
+            let FlexLocalId::Schedule(schedule_id) = id else { continue };
+            ui.label(format!(" - {} -> {} FPS", schedule_id.id, 1.0 / *delta_time));
+        }
+    });
 }
