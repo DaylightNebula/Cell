@@ -4,7 +4,7 @@ use anarchy::{DeltaTime, FlexLocalId, Res, Resource, ResourceMeta, Schedule, Sch
 use chrono::Utc;
 use ::egui::Window;
 use magician_vgpu::RenderFrame;
-use mutual::DashSet;
+use mutual::{CowData, DashSet};
 use winit::event_loop::EventLoop;
 
 pub mod egui;
@@ -26,7 +26,7 @@ pub struct App {
     primary_schedule_id: ScheduleID,
     primary_schedule: Option<Schedule<(), ()>>,
     render_schedule_id: ScheduleID,
-    render_schedule: Option<Schedule<RenderScheduleIn, RenderScheduleOut>>,
+    render_schedule: CowData<Schedule<RenderScheduleIn, RenderScheduleOut>>,
     added_plugins: DashSet<TypeId>,
     world: World
 }
@@ -39,7 +39,7 @@ impl App {
             primary_schedule_id: ScheduleID { id: "APP", tick_rate: 60, max_threads: 4 },
             primary_schedule: Some(Schedule::new_empty()),
             render_schedule_id: ScheduleID { id: "RENDER", tick_rate: 0, max_threads: 1 },
-            render_schedule: Some(Schedule::new_empty()),
+            render_schedule: CowData::new(Schedule::new_empty()),
             added_plugins: DashSet::default(),
             world: World::new()
         };
@@ -92,20 +92,20 @@ impl App {
     }
 
     /// Add a system to run on update of the render schedule.
-    pub fn on_render_startup<S>(mut self, system: S) -> Self
+    pub fn on_render_startup<S>(self, system: S) -> Self
         where S: System<RenderScheduleIn, Result<RenderScheduleOut, Box<dyn std::error::Error>>> + 'static
     {
         let tile = ScheduleTile::new(vec![Box::new(system)]);
-        self.render_schedule.as_mut().unwrap().add_startup(tile);
+        self.render_schedule.get_ref().add_startup(tile);
         return self;
     }
 
     /// Add a system to run on update of the render schedule.
-    pub fn on_render_update<S>(mut self, system: S) -> Self
+    pub fn on_render_update<S>(self, system: S) -> Self
         where S: System<RenderScheduleIn, Result<RenderScheduleOut, Box<dyn std::error::Error>>> + 'static
     {
         let tile = ScheduleTile::new(vec![Box::new(system)]);
-        self.render_schedule.as_mut().unwrap().add_new(tile);
+        self.render_schedule.get_ref().add_new(tile);
         return self;
     }
 
@@ -168,14 +168,16 @@ impl App {
                 .store(frame);
         }
 
-        self.render_schedule = Some(execute_schedule_sync(
-            self.render_schedule
-                .take()
-                .expect("Render schedule has gone missing"),
-            self.render_schedule_id,
-            &self.world,
+        // swap schedules then execute the previous one
+        let prev_schedule = CowData::new(Schedule::new_empty());
+        self.render_schedule().swap(&prev_schedule);
+        execute_schedule_sync(
+            &prev_schedule.get_ref(), 
+            &*self.render_schedule.get_ref(), 
+            self.render_schedule_id, 
+            &self.world, 
             &()
-        ));
+        );
 
         let frame = {
             self.world.get_resource_mut::<Frame>()
