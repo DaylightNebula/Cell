@@ -21,6 +21,8 @@ pub use utils::*;
 pub type RenderScheduleIn = ();
 pub type RenderScheduleOut = ();
 
+pub const RENDER_SCHEDULE_ID: ScheduleID = ScheduleID { id: "RENDER", tick_rate: 0, max_threads: 1 };
+
 #[derive(Getters, GettersMut)]
 pub struct App {
     primary_schedule_id: ScheduleID,
@@ -38,7 +40,7 @@ impl App {
         let mut app = App {
             primary_schedule_id: ScheduleID { id: "APP", tick_rate: 60, max_threads: 4 },
             primary_schedule: Some(Schedule::new_empty()),
-            render_schedule_id: ScheduleID { id: "RENDER", tick_rate: 0, max_threads: 1 },
+            render_schedule_id: RENDER_SCHEDULE_ID,
             render_schedule: CowData::new(Schedule::new_empty()),
             added_plugins: DashSet::default(),
             world: World::new()
