@@ -1,9 +1,10 @@
 use std::any::TypeId;
 
-use anarchy::{DeltaTime, FlexLocalId, Res, Resource, ResourceMeta, Schedule, ScheduleID, ScheduleTile, Scheduler, System, World, execute_schedule_sync, macros::{Getters, GettersMut, system}};
+use anarchy::{DeltaTime, FlexLocalId, Res, Resource, ResourceMeta, Schedule, ScheduleID, ScheduleTile, Scheduler, System, World, execute_schedule_sync, macros::{Getters, GettersMut, Resource, system}};
 use chrono::Utc;
+use derive_more::{Deref, DerefMut};
 use ::egui::Window;
-use magician_vgpu::RenderFrame;
+use magician_vgpu::{RenderFrame, glam::UVec2};
 use mutual::{CowData, DashSet};
 use winit::event_loop::EventLoop;
 
@@ -22,6 +23,9 @@ pub type RenderScheduleIn = ();
 pub type RenderScheduleOut = ();
 
 pub const RENDER_SCHEDULE_ID: ScheduleID = ScheduleID { id: "RENDER", tick_rate: 0, max_threads: 1 };
+
+#[derive(Deref, DerefMut, Resource)]
+pub struct WindowDimensions(UVec2);
 
 #[derive(Getters, GettersMut)]
 pub struct App {
@@ -45,6 +49,8 @@ impl App {
             added_plugins: DashSet::default(),
             world: World::new()
         };
+
+        app = app.add_resource(WindowDimensions(UVec2::ZERO));
 
         #[cfg(feature = "auto-egui")]
         {
@@ -154,7 +160,8 @@ impl App {
         vgpu.config_mut().width = width;
         vgpu.config_mut().height = height;
         vgpu.surface().configure(vgpu.device(), vgpu.config());
-     }
+        self.world().get_resource_mut::<WindowDimensions>().as_mut().unwrap().0 = UVec2::new(width, height);
+    }
 
     pub(crate) fn render(&mut self) -> anyhow::Result<()> {
         let start = Utc::now();
