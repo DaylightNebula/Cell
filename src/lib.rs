@@ -1,3 +1,8 @@
+//! `cell` is a thin wrapper that runs an [`anarchy`] ECS `World` inside a `winit`/`wgpu`
+//! application. It provides an [`App`] builder that wires up a primary update schedule and a
+//! render schedule, dispatches `winit` window events into the ECS, and (optionally) sets up
+//! an `egui` integration for debugging. Functionality is added to an `App` via [`Plugin`]s.
+
 use std::any::TypeId;
 
 use anarchy::{DeltaTime, FlexLocalId, Res, Resource, ResourceMeta, Schedule, ScheduleID, ScheduleTile, Scheduler, System, World, execute_schedule_sync, macros::{Getters, GettersMut, Resource, system}};
@@ -19,14 +24,26 @@ pub use gpu::*;
 pub use plugin::*;
 pub use utils::*;
 
+/// Input type of the render schedule's systems.
 pub type RenderScheduleIn = ();
+/// Output type of the render schedule's systems.
 pub type RenderScheduleOut = ();
 
+/// ID of the schedule that runs once per rendered frame (triggered by `RedrawRequested`,
+/// single-threaded). This is constant, it should never be changed at runtime.
 pub const RENDER_SCHEDULE_ID: ScheduleID = ScheduleID { id: "RENDER", tick_rate: 0, max_threads: 1 };
 
+/// Resource holding the current size of the app's window, in pixels. Kept in sync
+/// automatically whenever the window is resized.
 #[derive(Deref, DerefMut, Resource)]
 pub struct WindowDimensions(UVec2);
 
+/// Builder for a `winit`/`wgpu` application backed by an `anarchy` ECS `World`.
+///
+/// An `App` owns a primary schedule (ticked on a fixed rate, independent of rendering) and a
+/// render schedule (run once per `RedrawRequested`). Plugins, resources, and systems are
+/// attached via the builder methods below, then [`App::run`] hands control to the `winit`
+/// event loop. Field accessors are generated via `Getters`/`GettersMut`.
 #[derive(Getters, GettersMut)]
 pub struct App {
     primary_schedule_id: ScheduleID,
@@ -117,6 +134,9 @@ impl App {
         return self;
     }
 
+    /// Schedule the primary schedule and hand control over to the `winit` event loop. This
+    /// creates the window, drives resize/redraw events into the `App`, and blocks until the
+    /// event loop exits.
     pub fn run(mut self) -> anyhow::Result<()> {
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -151,6 +171,7 @@ impl App {
         Ok(())
     }
 
+    /// Reconfigure the GPU surface and [`WindowDimensions`] resource after a window resize.
     pub(crate) fn resize(&mut self, width: u32, height: u32) {
         let Some(mut vgpu) = self.world
             .get_resource_mut::<Graphics>() 
@@ -163,6 +184,8 @@ impl App {
         self.world().get_resource_mut::<WindowDimensions>().as_mut().unwrap().0 = UVec2::new(width, height);
     }
 
+    /// Run one frame: begin a [`RenderFrame`], swap and execute the render schedule against
+    /// it, submit the frame, and record the render schedule's delta time.
     pub(crate) fn render(&mut self) -> anyhow::Result<()> {
         let start = Utc::now();
         let Some(vgpu) = self.world

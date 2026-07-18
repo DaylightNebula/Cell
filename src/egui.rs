@@ -3,6 +3,9 @@ use magician_vgpu::{LoadOp, PassAttachment, PassTarget, StoreOp};
 
 use crate::{App, Frame, Graphics, Plugin, WindowEvent};
 
+/// Plugin that wires up `egui` rendering. Sets up an [`EguiCtx`] resource on render startup,
+/// then begins and ends an egui pass around every render frame so systems can draw egui UI
+/// during the normal render schedule.
 pub struct EguiPlugin;
 impl Plugin for EguiPlugin {
     fn build(self, app: App) -> App {
@@ -12,6 +15,9 @@ impl Plugin for EguiPlugin {
     }
 }
 
+/// Resource bundling the `egui` context, `winit` integration state, and `wgpu` renderer used
+/// to draw UI each frame. Inserted by [`EguiPlugin`]; use `context` to build UI in your own
+/// render systems (see the crate-level example).
 #[derive(Resource)]
 pub struct EguiCtx {
     pub context: egui::Context,
@@ -45,6 +51,7 @@ fn setup_egui(
 
 static WINDOW_EVENT_TRACKER: EventSystemMinIDTracker = EventSystemMinIDTracker::new();
 
+// Runs first in the render schedule so the egui pass is open before any other render system.
 #[system(std::i32::MIN)]
 fn start_egui_frame(
     graphics: Res<Graphics>,
@@ -60,6 +67,7 @@ fn start_egui_frame(
     ctx.context.begin_pass(raw_input);
 }
 
+// Runs last in the render schedule so it captures UI drawn by every other render system.
 #[system(std::i32::MAX)]
 fn end_egui_frame(
     graphics: Res<Graphics>,
