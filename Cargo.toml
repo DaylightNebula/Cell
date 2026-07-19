@@ -12,7 +12,6 @@ anarchy = { path = "../anarchy" }
 mutual = "1.0.2"
 magician-vgpu = { path = "../shader_magician/magician-vgpu" }
 
-anyhow = "1.0.102"
 winit = { version = "0.30", features = ["android-native-activity"] }
 env_logger = "0.11"
 wgpu = "29.0"

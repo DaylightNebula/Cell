@@ -3,6 +3,8 @@ use magician_vgpu::{LoadOp, PassAttachment, PassTarget, StoreOp};
 
 use crate::{App, Frame, Graphics, Plugin, WindowEvent};
 
+pub use egui as egui;
+
 /// Plugin that wires up `egui` rendering. Sets up an [`EguiCtx`] resource on render startup,
 /// then begins and ends an egui pass around every render frame so systems can draw egui UI
 /// during the normal render schedule.

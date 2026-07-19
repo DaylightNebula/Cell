@@ -5,7 +5,7 @@
 
 use std::any::TypeId;
 
-use anarchy::{DeltaTime, FlexLocalId, Res, Resource, ResourceMeta, Schedule, ScheduleID, ScheduleTile, Scheduler, System, World, execute_schedule_sync, macros::{Getters, GettersMut, Resource, system}};
+use anarchy::{DeltaTime, FlexLocalId, Res, Resource, ResourceMeta, Schedule, ScheduleID, ScheduleTile, Scheduler, System, World, anyhow, execute_schedule_sync, macros::{Getters, GettersMut, Resource, system}};
 use chrono::Utc;
 use derive_more::{Deref, DerefMut};
 use ::egui::Window;
@@ -100,7 +100,7 @@ impl App {
 
     /// Add a system to run on startup of the primary schedule.
     pub fn on_startup<S>(mut self, system: S) -> Self
-        where S: System<(), Result<(), Box<dyn std::error::Error>>> + 'static
+        where S: System<(), anyhow::Result<()>> + 'static
     {
         let tile = ScheduleTile::new(vec![Box::new(system)]);
         self.primary_schedule.as_mut().unwrap().add_startup(tile);
@@ -109,7 +109,7 @@ impl App {
 
     /// Add a system to run on update of the primary schedule.
     pub fn on_update<S>(mut self, system: S) -> Self
-        where S: System<(), Result<(), Box<dyn std::error::Error>>> + 'static
+        where S: System<(), anyhow::Result<()>> + 'static
     {
         let tile = ScheduleTile::new(vec![Box::new(system)]);
         self.primary_schedule.as_mut().unwrap().add_new(tile);
@@ -118,7 +118,7 @@ impl App {
 
     /// Add a system to run on update of the render schedule.
     pub fn on_render_startup<S>(self, system: S) -> Self
-        where S: System<RenderScheduleIn, Result<RenderScheduleOut, Box<dyn std::error::Error>>> + 'static
+        where S: System<RenderScheduleIn, anyhow::Result<RenderScheduleOut>> + 'static
     {
         let tile = ScheduleTile::new(vec![Box::new(system)]);
         self.render_schedule.get_ref().add_startup(tile);
@@ -127,7 +127,7 @@ impl App {
 
     /// Add a system to run on update of the render schedule.
     pub fn on_render_update<S>(self, system: S) -> Self
-        where S: System<RenderScheduleIn, Result<RenderScheduleOut, Box<dyn std::error::Error>>> + 'static
+        where S: System<RenderScheduleIn, anyhow::Result<RenderScheduleOut>> + 'static
     {
         let tile = ScheduleTile::new(vec![Box::new(system)]);
         self.render_schedule.get_ref().add_new(tile);
