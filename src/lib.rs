@@ -5,7 +5,7 @@
 
 use std::any::TypeId;
 
-use anarchy::{DeltaTime, FlexLocalId, Res, Resource, ResourceMeta, Schedule, ScheduleID, ScheduleTile, Scheduler, System, World, anyhow, execute_schedule_sync, macros::{Getters, GettersMut, Resource, info, system}};
+use anarchy::{DeltaTime, FlexLocalId, Res, Resource, ResourceMeta, Schedule, ScheduleID, ScheduleTile, Scheduler, System, World, anyhow, execute_schedule_sync, macros::{Getters, GettersMut, Resource, system}};
 use chrono::Utc;
 use derive_more::{Deref, DerefMut};
 use ::egui::Window;
