@@ -16,7 +16,7 @@ impl ApplicationHandler<()> for AppWrapper {
 
         #[cfg(target_arch = "wasm32")]
         {
-            use wasm_bindgen::JsCast;
+            use wasm_bindgen::{JsCast, UnwrapThrowExt};
             use winit::platform::web::WindowAttributesExtWebSys;
             
             const CANVAS_ID: &str = "canvas";
@@ -46,19 +46,17 @@ impl ApplicationHandler<()> for AppWrapper {
 
         #[cfg(target_arch = "wasm32")]
         {
-            // Run the future asynchronously and use the
-            // proxy to send the results to the event loop
-            if let Some(proxy) = self.proxy.take() {
-                wasm_bindgen_futures::spawn_local(async move {
-                    assert!(proxy
-                        .send_event(
-                            State::new(window)
-                                .await
-                                .expect("Unable to create canvas!!!")
-                        )
-                        .is_ok())
-                });
-            }
+            // wasm can't block on the GPU setup future, so spawn it and hand the
+            // resources to the (shared, clonable) world once it resolves
+            use magician_vgpu::VirtualGpu;
+            use crate::{Frame, Graphics};
+
+            let world = self.app.world.clone();
+            wasm_bindgen_futures::spawn_local(async move {
+                let vgpu = VirtualGpu::new(window).await;
+                world.insert_resource(Graphics(vgpu));
+                world.insert_resource(Frame::default());
+            });
         }
     }
 

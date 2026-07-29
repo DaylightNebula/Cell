@@ -1,4 +1,4 @@
-use anarchy::{Res, ResMut, anyhow, macros::{Resource, system}};
+use anarchy::{Res, ResMut, anyhow, macros::{Resource, info, system}};
 use cell::{App, EguiCtx, EguiPlugin};
 
 #[derive(Resource)]

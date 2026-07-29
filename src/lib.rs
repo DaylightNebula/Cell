@@ -5,7 +5,7 @@
 
 use std::any::TypeId;
 
-use anarchy::{DeltaTime, FlexLocalId, Res, Resource, ResourceMeta, Schedule, ScheduleID, ScheduleTile, Scheduler, System, World, anyhow, execute_schedule_sync, macros::{Getters, GettersMut, Resource, system}};
+use anarchy::{DeltaTime, FlexLocalId, Res, Resource, ResourceMeta, Schedule, ScheduleID, ScheduleTile, Scheduler, System, World, anyhow, execute_schedule_sync, macros::{Getters, GettersMut, Resource, info, system}};
 use chrono::Utc;
 use derive_more::{Deref, DerefMut};
 use ::egui::Window;
@@ -57,6 +57,9 @@ pub struct App {
 impl App {
     /// Create a new `App` instance.
     pub fn new() -> Self {
+        #[cfg(target_arch = "wasm32")]
+        console_error_panic_hook::set_once();
+
         #[allow(unused_mut)] // used by non-default features
         let mut app = App {
             primary_schedule_id: ScheduleID { id: "APP", tick_rate: 60, max_threads: 4 },
@@ -144,7 +147,7 @@ impl App {
         }
         #[cfg(target_arch = "wasm32")]
         {
-            console_log::init_with_level(log::Level::Info).unwrap_throw();
+            console_log::init_with_level(log::Level::Info).unwrap();
         }
 
         // schedule primary schedule
@@ -164,8 +167,11 @@ impl App {
         }
         #[cfg(target_arch = "wasm32")]
         {
-            let app = App::new(&event_loop);
-            event_loop.spawn_app(app);
+            use winit::platform::web::EventLoopExtWebSys;
+            use crate::wrapper::AppWrapper;
+
+            let wrapper = AppWrapper { app: self };
+            event_loop.spawn_app(wrapper);
         }
 
         Ok(())
@@ -224,9 +230,9 @@ impl App {
         // record delta time
         let total_runtime = Utc::now().signed_duration_since(start).to_std().map(|a| a.as_nanos()).unwrap_or(0);
         let deltatime = total_runtime as f32 / 1_000_000_000.0;
-        self.world.get_resource_ref::<DeltaTime>()
-            .expect("DeltaTime was lost!")
-            .set(FlexLocalId::Schedule(self.render_schedule_id), deltatime);
+        if let Some(delta) = self.world.get_resource_ref::<DeltaTime>() {
+            delta.set(FlexLocalId::Schedule(self.render_schedule_id), deltatime);
+        }
 
         Ok(())
     }
