@@ -193,11 +193,16 @@ impl App {
     /// Run one frame: begin a [`RenderFrame`], swap and execute the render schedule against
     /// it, submit the frame, and record the render schedule's delta time.
     pub(crate) fn render(&mut self) -> anyhow::Result<()> {
+        #[cfg(target_arch = "wasm32")]
+        Scheduler::tick_tasks();
+        
+        // get start time and vgpu
         let start = Utc::now();
         let Some(vgpu) = self.world
             .get_resource_ref::<Graphics>() 
             else { return Ok(()) };
         
+        // start and insert `Frame`
         {
             let Some(frame) = RenderFrame::begin(&vgpu)?
                 else { return Ok(()) };
