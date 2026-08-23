@@ -7,7 +7,7 @@ use winit::{
     window::{Window, WindowId},
 };
 
-use crate::{App, WindowEvent};
+use crate::{App, DeviceEvent, WindowEvent};
 
 pub(crate) struct AppWrapper {
     pub(crate) app: App,
@@ -64,15 +64,15 @@ impl ApplicationHandler<()> for AppWrapper {
         }
     }
 
-    fn user_event(&mut self, _event_loop: &ActiveEventLoop, _event: ()) {
-        // #[cfg(target_arch = "wasm32")]
-        // {
-        //     event.window.request_redraw();
-        //     event.resize(
-        //         event.window.inner_size().width,
-        //         event.window.inner_size().height,
-        //     );
-        // }
+    fn device_event(
+        &mut self,
+        _event_loop: &ActiveEventLoop,
+        _device_id: winit::event::DeviceId,
+        event: winit::event::DeviceEvent,
+    ) {
+        if let Some(event_tracker) = self.app.world.get_resource_ref::<EventTracker>() {
+            event_tracker.broadcast_event(DeviceEvent(event));
+        }
     }
 
     fn window_event(

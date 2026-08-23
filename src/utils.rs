@@ -5,3 +5,8 @@ use derive_more::{Deref, DerefMut};
 /// window event received by the event loop, so systems can react to input, resizes, etc.
 #[derive(Event, Debug, Clone, Deref, DerefMut)]
 pub struct WindowEvent(pub winit::event::WindowEvent);
+
+/// ECS event wrapping a raw `winit::event::DeviceEvent`. Broadcast into the `World` for every
+/// device event received by the event loop, so systems can react to input, resizes, etc.
+#[derive(Event, Debug, Clone, Deref, DerefMut)]
+pub struct DeviceEvent(pub winit::event::DeviceEvent);
