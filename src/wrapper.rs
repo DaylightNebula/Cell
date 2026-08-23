@@ -1,12 +1,16 @@
 use std::sync::Arc;
 
 use anarchy::EventTracker;
-use winit::{application::ApplicationHandler, event_loop::ActiveEventLoop, window::{Window, WindowId}};
+use winit::{
+    application::ApplicationHandler,
+    event_loop::ActiveEventLoop,
+    window::{Window, WindowId},
+};
 
 use crate::{App, WindowEvent};
 
 pub(crate) struct AppWrapper {
-    pub(crate) app: App
+    pub(crate) app: App,
 }
 
 impl ApplicationHandler<()> for AppWrapper {
@@ -18,7 +22,7 @@ impl ApplicationHandler<()> for AppWrapper {
         {
             use wasm_bindgen::{JsCast, UnwrapThrowExt};
             use winit::platform::web::WindowAttributesExtWebSys;
-            
+
             const CANVAS_ID: &str = "canvas";
 
             let window = wgpu::web_sys::window().unwrap_throw();
@@ -36,8 +40,8 @@ impl ApplicationHandler<()> for AppWrapper {
             // await the window creation
             // self.state = Some(pollster::block_on(State::new(window)).unwrap());
 
-            use magician_vgpu::VirtualGpu;
             use crate::{Frame, Graphics};
+            use magician_vgpu::VirtualGpu;
 
             let vgpu = pollster::block_on(VirtualGpu::new(window));
             self.app.world.insert_resource(Graphics(vgpu));
@@ -48,8 +52,8 @@ impl ApplicationHandler<()> for AppWrapper {
         {
             // wasm can't block on the GPU setup future, so spawn it and hand the
             // resources to the (shared, clonable) world once it resolves
-            use magician_vgpu::VirtualGpu;
             use crate::{Frame, Graphics};
+            use magician_vgpu::VirtualGpu;
 
             let world = self.app.world.clone();
             wasm_bindgen_futures::spawn_local(async move {
@@ -75,10 +79,12 @@ impl ApplicationHandler<()> for AppWrapper {
         &mut self,
         event_loop: &ActiveEventLoop,
         _window_id: WindowId,
-        event: winit::event::WindowEvent
+        event: winit::event::WindowEvent,
     ) {
-        if let Some(event_tracker) = self.app.world.get_resource_mut::<EventTracker>() {
-            event_tracker.broadcast_event(WindowEvent(event.clone()));
+        {
+            if let Some(event_tracker) = self.app.world.get_resource_ref::<EventTracker>() {
+                event_tracker.broadcast_event(WindowEvent(event.clone()));
+            }
         }
 
         match &event {
