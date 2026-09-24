@@ -1,9 +1,10 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::{Duration, Instant}};
 
 use anarchy::EventTracker;
 use winit::{
     application::ApplicationHandler,
-    event_loop::ActiveEventLoop,
+    event::StartCause,
+    event_loop::{ActiveEventLoop, ControlFlow},
     window::{Window, WindowId},
 };
 
@@ -11,9 +12,46 @@ use crate::{App, DeviceEvent, WindowEvent};
 
 pub(crate) struct AppWrapper {
     pub(crate) app: App,
+    /// Earliest time the next frame may render, `None` until the first capped frame.
+    pub(crate) next_frame: Option<Instant>,
+}
+
+impl AppWrapper {
+    /// Returns the deadline to wait for if the render rate cap says it's too early to render,
+    /// otherwise claims the current frame slot and returns `None`.
+    fn frame_too_early(&mut self) -> Option<Instant> {
+        // web redraws are already paced by requestAnimationFrame, and `Instant::now` panics there
+        if cfg!(target_arch = "wasm32") { return None }
+        let rate = self.app.render_schedule_id.tick_rate;
+        if rate == 0 { return None }
+
+        let now = Instant::now();
+        let period = Duration::from_secs(1) / rate;
+        match self.next_frame {
+            Some(next) if now < next => return Some(next),
+            // keep cadence from the last deadline so frames don't drift, but never bank a backlog
+            Some(next) => self.next_frame = Some((next + period).max(now)),
+            None => self.next_frame = Some(now + period),
+        }
+        None
+    }
+
+    fn present_mode(&self) -> wgpu::PresentMode {
+        if self.app.vsync { wgpu::PresentMode::AutoVsync } else { wgpu::PresentMode::AutoNoVsync }
+    }
 }
 
 impl ApplicationHandler<()> for AppWrapper {
+    fn new_events(&mut self, event_loop: &ActiveEventLoop, cause: StartCause) {
+        // a frame was deferred by the render rate cap, its time has come
+        if let StartCause::ResumeTimeReached { .. } = cause {
+            event_loop.set_control_flow(ControlFlow::Wait);
+            if let Some(graphics) = self.app.world.get_resource_ref::<crate::Graphics>() {
+                graphics.window().request_redraw();
+            }
+        }
+    }
+
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         #[allow(unused_mut)]
         let mut window_attributes = Window::default_attributes();
@@ -43,7 +81,9 @@ impl ApplicationHandler<()> for AppWrapper {
             use crate::{Frame, Graphics};
             use magician_vgpu::VirtualGpu;
 
-            let vgpu = pollster::block_on(VirtualGpu::new(window));
+            let mut vgpu = pollster::block_on(VirtualGpu::new(window));
+            // applied when the first resize configures the surface
+            vgpu.config_mut().present_mode = self.present_mode();
             self.app.world.insert_resource(Graphics(vgpu));
             self.app.world.insert_resource(Frame::default());
         }
@@ -56,8 +96,10 @@ impl ApplicationHandler<()> for AppWrapper {
             use magician_vgpu::VirtualGpu;
 
             let world = self.app.world.clone();
+            let present_mode = self.present_mode();
             wasm_bindgen_futures::spawn_local(async move {
-                let vgpu = VirtualGpu::new(window).await;
+                let mut vgpu = VirtualGpu::new(window).await;
+                vgpu.config_mut().present_mode = present_mode;
                 world.insert_resource(Graphics(vgpu));
                 world.insert_resource(Frame::default());
             });
@@ -91,6 +133,10 @@ impl ApplicationHandler<()> for AppWrapper {
             winit::event::WindowEvent::CloseRequested => event_loop.exit(),
             winit::event::WindowEvent::Resized(size) => self.app.resize(size.width, size.height),
             winit::event::WindowEvent::RedrawRequested => {
+                if let Some(deadline) = self.frame_too_early() {
+                    event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
+                    return;
+                }
                 let _ = self.app.render();
             }
             _ => {}

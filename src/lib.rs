@@ -6,7 +6,7 @@
 use std::any::TypeId;
 
 use anarchy::{DeltaTime, FlexLocalId, Res, Resource, ResourceMeta, Schedule, ScheduleID, ScheduleTile, Scheduler, System, World, anyhow, execute_schedule_sync, macros::{Getters, GettersMut, Resource, system}};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use derive_more::{Deref, DerefMut};
 use ::egui::Window;
 use magician_vgpu::{RenderFrame, glam::UVec2};
@@ -29,9 +29,15 @@ pub type RenderScheduleIn = ();
 /// Output type of the render schedule's systems.
 pub type RenderScheduleOut = ();
 
-/// ID of the schedule that runs once per rendered frame (triggered by `RedrawRequested`,
-/// single-threaded). This is constant, it should never be changed at runtime.
+/// Default ID of the schedule that runs once per rendered frame (triggered by `RedrawRequested`,
+/// single-threaded). A `tick_rate` of 0 renders as fast as possible, otherwise frames are capped
+/// to `tick_rate` per second. Set with [`App::with_render_rate`], read the final ID at runtime
+/// from the [`RenderScheduleID`] resource.
 pub const RENDER_SCHEDULE_ID: ScheduleID = ScheduleID { id: "RENDER", tick_rate: 0, max_threads: 1 };
+
+/// Resource holding the render schedule's final [`ScheduleID`], inserted by [`App::run`].
+#[derive(Deref, Resource, Clone, Copy)]
+pub struct RenderScheduleID(pub ScheduleID);
 
 /// Resource holding the current size of the app's window, in pixels. Kept in sync
 /// automatically whenever the window is resized.
@@ -51,6 +57,10 @@ pub struct App {
     render_schedule_id: ScheduleID,
     render_schedule: CowData<Schedule<RenderScheduleIn, RenderScheduleOut>>,
     added_plugins: DashSet<TypeId>,
+    /// Whether presentation waits for the display's vertical blank.
+    vsync: bool,
+    /// Start time of the previous frame, used for the render schedule's delta time.
+    last_render: Option<DateTime<Utc>>,
     world: World
 }
 
@@ -67,6 +77,8 @@ impl App {
             render_schedule_id: RENDER_SCHEDULE_ID,
             render_schedule: CowData::new(Schedule::new_empty()),
             added_plugins: DashSet::default(),
+            vsync: false,
+            last_render: None,
             world: World::new()
         };
 
@@ -93,6 +105,18 @@ impl App {
         if self.added_plugins.contains(&type_id) { return self }
         self.added_plugins.insert(type_id);
         return plugin.build(self);
+    }
+
+    /// Cap rendering to `rate` frames per second, 0 renders as fast as possible (the default).
+    pub fn with_render_rate(mut self, rate: u32) -> Self {
+        self.render_schedule_id.tick_rate = rate;
+        return self;
+    }
+
+    /// Enable or disable vsync, off by default.
+    pub fn with_vsync(mut self, vsync: bool) -> Self {
+        self.vsync = vsync;
+        return self;
     }
 
     /// Add a resource to this apps world.
@@ -150,6 +174,8 @@ impl App {
             console_log::init_with_level(log::Level::Info).unwrap();
         }
 
+        self.world.insert_resource(RenderScheduleID(self.render_schedule_id));
+
         // schedule primary schedule
         Scheduler::schedule(
             self.primary_schedule_id, 
@@ -162,7 +188,7 @@ impl App {
         {
             use crate::wrapper::AppWrapper;
 
-            let mut wrapper = AppWrapper { app: self };
+            let mut wrapper = AppWrapper { app: self, next_frame: None };
             event_loop.run_app(&mut wrapper)?;
         }
         #[cfg(target_arch = "wasm32")]
@@ -170,7 +196,7 @@ impl App {
             use winit::platform::web::EventLoopExtWebSys;
             use crate::wrapper::AppWrapper;
 
-            let wrapper = AppWrapper { app: self };
+            let wrapper = AppWrapper { app: self, next_frame: None };
             event_loop.spawn_app(wrapper);
         }
 
@@ -232,9 +258,10 @@ impl App {
         // finalize frame
         frame.submit(&vgpu);
 
-        // record delta time
-        let total_runtime = Utc::now().signed_duration_since(start).to_std().map(|a| a.as_nanos()).unwrap_or(0);
-        let deltatime = total_runtime as f32 / 1_000_000_000.0;
+        // record delta time as the interval between frame starts, so it covers any time spent
+        // waiting on the render rate cap or vsync and not just the work done this frame
+        let previous = self.last_render.replace(start).unwrap_or(start);
+        let deltatime = start.signed_duration_since(previous).to_std().map(|a| a.as_secs_f32()).unwrap_or(0.0);
         if let Some(delta) = self.world.get_resource_ref::<DeltaTime>() {
             delta.set(FlexLocalId::Schedule(self.render_schedule_id), deltatime);
         }
