@@ -35,6 +35,11 @@ pub type RenderScheduleOut = ();
 /// from the [`RenderScheduleID`] resource.
 pub const RENDER_SCHEDULE_ID: ScheduleID = ScheduleID { id: "RENDER", tick_rate: 0, max_threads: 1 };
 
+/// Resource holding the primary schedule's [`ScheduleID`], inserted by [`App::run`]. Pass it to
+/// `Scheduler::set_tick_rate` to change the update rate while running.
+#[derive(Deref, Resource, Clone, Copy)]
+pub struct PrimaryScheduleID(pub ScheduleID);
+
 /// Resource holding the render schedule's final [`ScheduleID`], inserted by [`App::run`].
 #[derive(Deref, Resource, Clone, Copy)]
 pub struct RenderScheduleID(pub ScheduleID);
@@ -107,6 +112,12 @@ impl App {
         return plugin.build(self);
     }
 
+    /// Tick the primary schedule `rate` times per second, 0 runs it as fast as possible (default 60).
+    pub fn with_update_rate(mut self, rate: u32) -> Self {
+        self.primary_schedule_id.tick_rate = rate;
+        return self;
+    }
+
     /// Cap rendering to `rate` frames per second, 0 renders as fast as possible (the default).
     pub fn with_render_rate(mut self, rate: u32) -> Self {
         self.render_schedule_id.tick_rate = rate;
@@ -174,6 +185,7 @@ impl App {
             console_log::init_with_level(log::Level::Info).unwrap();
         }
 
+        self.world.insert_resource(PrimaryScheduleID(self.primary_schedule_id));
         self.world.insert_resource(RenderScheduleID(self.render_schedule_id));
 
         // schedule primary schedule
