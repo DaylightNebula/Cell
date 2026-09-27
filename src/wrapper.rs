@@ -1,6 +1,7 @@
-use std::{sync::Arc, time::{Duration, Instant}};
+use std::sync::Arc;
 
 use anarchy::EventTracker;
+use chrono::{DateTime, TimeDelta, Utc};
 use winit::{
     application::ApplicationHandler,
     event::StartCause,
@@ -13,20 +14,20 @@ use crate::{App, DeviceEvent, WindowEvent};
 pub(crate) struct AppWrapper {
     pub(crate) app: App,
     /// Earliest time the next frame may render, `None` until the first capped frame.
-    pub(crate) next_frame: Option<Instant>,
+    pub(crate) next_frame: Option<DateTime<Utc>>,
 }
 
 impl AppWrapper {
     /// Returns the deadline to wait for if the render rate cap says it's too early to render,
     /// otherwise claims the current frame slot and returns `None`.
-    fn frame_too_early(&mut self) -> Option<Instant> {
-        // web redraws are already paced by requestAnimationFrame, and `Instant::now` panics there
+    fn frame_too_early(&mut self) -> Option<DateTime<Utc>> {
+        // web redraws are already paced by requestAnimationFrame
         if cfg!(target_arch = "wasm32") { return None }
         let rate = self.app.render_schedule_id.tick_rate;
         if rate == 0 { return None }
 
-        let now = Instant::now();
-        let period = Duration::from_secs(1) / rate;
+        let now = Utc::now();
+        let period = TimeDelta::nanoseconds(1_000_000_000 / rate as i64);
         match self.next_frame {
             Some(next) if now < next => return Some(next),
             // keep cadence from the last deadline so frames don't drift, but never bank a backlog
@@ -134,7 +135,13 @@ impl ApplicationHandler<()> for AppWrapper {
             winit::event::WindowEvent::Resized(size) => self.app.resize(size.width, size.height),
             winit::event::WindowEvent::RedrawRequested => {
                 if let Some(deadline) = self.frame_too_early() {
-                    event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
+                    // winit wakes on its own `Instant`, and web never defers a frame so only native converts
+                    #[cfg(not(target_arch = "wasm32"))]
+                    event_loop.set_control_flow(ControlFlow::WaitUntil(
+                        std::time::Instant::now() + (deadline - Utc::now()).to_std().unwrap_or_default()
+                    ));
+                    #[cfg(target_arch = "wasm32")]
+                    let _ = deadline;
                     return;
                 }
                 let _ = self.app.render();
