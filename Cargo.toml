@@ -10,6 +10,8 @@ dbg-schedules = ["auto-egui"]
 [dependencies]
 anarchy = { path = "../anarchy" }
 mutual = "1.0.2"
+anyhow = "1"
+log = "0.4.33"
 magician-vgpu = { path = "../shader_magician/magician-vgpu" }
 
 winit = { version = "0.30", features = ["android-native-activity"] }
@@ -38,4 +40,3 @@ web-sys = { version = "0.3", features = [
     "Window",
     "Element",
 ]}
-log = "0.4.33"

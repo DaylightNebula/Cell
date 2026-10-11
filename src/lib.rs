@@ -1,70 +1,72 @@
 //! `cell` is a thin wrapper that runs an [`anarchy`] ECS `World` inside a `winit`/`wgpu`
-//! application. It provides an [`App`] builder that wires up a primary update schedule and a
-//! render schedule, dispatches `winit` window events into the ECS, and (optionally) sets up
+//! application. It provides an [`App`] builder that wires up a primary update graph and a
+//! render graph, dispatches `winit` window events into the ECS, and (optionally) sets up
 //! an `egui` integration for debugging. Functionality is added to an `App` via [`Plugin`]s.
 
-use std::any::TypeId;
+use std::{any::TypeId, collections::HashSet, sync::{Arc, atomic::AtomicBool}};
 
-use anarchy::{DeltaTime, FlexLocalId, Res, Resource, ResourceMeta, Schedule, ScheduleID, ScheduleTile, Scheduler, System, World, anyhow, execute_schedule_sync, macros::{Getters, GettersMut, Resource, system}};
+use anarchy::{IntoSystem, Res, Resource, SingleThreadedExecutor, SystemGraph, SystemInstruction, World};
 use chrono::{DateTime, Utc};
 use derive_more::{Deref, DerefMut};
 use ::egui::Window;
 use magician_vgpu::{RenderFrame, glam::UVec2};
-use mutual::{CowData, DashSet};
 use winit::event_loop::EventLoop;
 
 pub mod egui;
 pub mod gpu;
 pub mod plugin;
+pub mod schedule;
 pub mod utils;
 pub(crate) mod wrapper;
 
 pub use egui::*;
 pub use gpu::*;
 pub use plugin::*;
+pub use schedule::*;
 pub use utils::*;
-
-/// Input type of the render schedule's systems.
-pub type RenderScheduleIn = ();
-/// Output type of the render schedule's systems.
-pub type RenderScheduleOut = ();
-
-/// Default ID of the schedule that runs once per rendered frame (triggered by `RedrawRequested`,
-/// single-threaded). A `tick_rate` of 0 renders as fast as possible, otherwise frames are capped
-/// to `tick_rate` per second. Set with [`App::with_render_rate`], read the final ID at runtime
-/// from the [`RenderScheduleID`] resource.
-pub const RENDER_SCHEDULE_ID: ScheduleID = ScheduleID { id: "RENDER", tick_rate: 0, max_threads: 1 };
-
-/// Resource holding the primary schedule's [`ScheduleID`], inserted by [`App::run`]. Pass it to
-/// `Scheduler::set_tick_rate` to change the update rate while running.
-#[derive(Deref, Resource, Clone, Copy)]
-pub struct PrimaryScheduleID(pub ScheduleID);
-
-/// Resource holding the render schedule's final [`ScheduleID`], inserted by [`App::run`].
-#[derive(Deref, Resource, Clone, Copy)]
-pub struct RenderScheduleID(pub ScheduleID);
 
 /// Resource holding the current size of the app's window, in pixels. Kept in sync
 /// automatically whenever the window is resized.
-#[derive(Deref, DerefMut, Resource)]
+#[derive(Debug, Deref, DerefMut, Resource)]
 pub struct WindowDimensions(UVec2);
 
 /// Builder for a `winit`/`wgpu` application backed by an `anarchy` ECS `World`.
 ///
-/// An `App` owns a primary schedule (ticked on a fixed rate, independent of rendering) and a
-/// render schedule (run once per `RedrawRequested`). Plugins, resources, and systems are
-/// attached via the builder methods below, then [`App::run`] hands control to the `winit`
-/// event loop. Field accessors are generated via `Getters`/`GettersMut`.
-#[derive(Getters, GettersMut)]
+/// An `App` owns four [`SystemGraph`]s: a startup and an update graph for the primary
+/// schedule (ticked at [`UpdateRate`], independent of rendering, on its own threads natively),
+/// and a startup and an update graph for the render schedule (run once per `RedrawRequested`
+/// on the event loop thread). Startup graphs run once before the first pass of their
+/// schedule; render startup waits until [`Graphics`] exists. Plugins, resources, and systems
+/// are attached via the builder methods below, then [`App::run`] hands control to the `winit`
+/// event loop.
 pub struct App {
-    primary_schedule_id: ScheduleID,
-    primary_schedule: Option<Schedule<(), ()>>,
-    render_schedule_id: ScheduleID,
-    render_schedule: CowData<Schedule<RenderScheduleIn, RenderScheduleOut>>,
-    added_plugins: DashSet<TypeId>,
+    /// Runs once before the first update pass.
+    startup: SystemGraph,
+    /// Runs every update pass.
+    update: SystemGraph,
+    /// Runs once before the first render frame.
+    render_startup: SystemGraph,
+    /// Runs every render frame.
+    render: SystemGraph,
+    render_exec: SingleThreadedExecutor,
+    /// Whether `render_startup` has run.
+    render_started: bool,
+    render_errors: ErrorLog,
+    /// Threads used to run the update graph natively.
+    update_threads: usize,
+    /// Paces the update graph from `render` on web, where there are no threads to run it on.
+    #[cfg(target_arch = "wasm32")]
+    update_pacer: Pacer,
+    #[cfg(target_arch = "wasm32")]
+    update_errors: ErrorLog,
+    /// Cleared when the event loop exits, stopping the update thread.
+    running: Arc<AtomicBool>,
+    added_plugins: HashSet<TypeId>,
+    /// The first error from appending a system, returned by [`App::run`].
+    build_error: Option<anyhow::Error>,
     /// Whether presentation waits for the display's vertical blank.
     vsync: bool,
-    /// Start time of the previous frame, used for the render schedule's delta time.
+    /// Start time of the previous frame, used for [`RenderDeltaTime`].
     last_render: Option<DateTime<Utc>>,
     world: World
 }
@@ -77,17 +79,31 @@ impl App {
 
         #[allow(unused_mut)] // used by non-default features
         let mut app = App {
-            primary_schedule_id: ScheduleID { id: "APP", tick_rate: 60, max_threads: 4 },
-            primary_schedule: Some(Schedule::new_empty()),
-            render_schedule_id: RENDER_SCHEDULE_ID,
-            render_schedule: CowData::new(Schedule::new_empty()),
-            added_plugins: DashSet::default(),
+            startup: SystemGraph::new(),
+            update: SystemGraph::new(),
+            render_startup: SystemGraph::new(),
+            render: SystemGraph::new(),
+            render_exec: SingleThreadedExecutor::new(),
+            render_started: false,
+            render_errors: ErrorLog::default(),
+            update_threads: 4,
+            #[cfg(target_arch = "wasm32")]
+            update_pacer: Pacer::default(),
+            #[cfg(target_arch = "wasm32")]
+            update_errors: ErrorLog::default(),
+            running: Arc::new(AtomicBool::new(true)),
+            added_plugins: HashSet::new(),
+            build_error: None,
             vsync: false,
             last_render: None,
-            world: World::new()
+            world: World::default()
         };
 
-        app = app.add_resource(WindowDimensions(UVec2::ZERO));
+        app = app.add_resource(WindowDimensions(UVec2::ZERO))
+            .add_resource(UpdateRate(60))
+            .add_resource(RenderRate(0))
+            .add_resource(UpdateDeltaTime::default())
+            .add_resource(RenderDeltaTime::default());
 
         #[cfg(feature = "auto-egui")]
         {
@@ -98,30 +114,37 @@ impl App {
         {
             app = app.on_render_update(dbg_schedules);
         }
-    
+
         return app;
+    }
+
+    /// The `World` this app runs its systems against.
+    pub fn world(&self) -> &World {
+        &self.world
     }
 
     /// Add a plugin to this `App`.  The plugins build function is called immeidately.
     /// If a plugin is added twice on accident, uniqueness is guaranteed, so the second
     /// and any future attempts will be ignored.
-    pub fn add_plugin<P: Plugin + 'static>(self, plugin: P) -> Self {
-        let type_id = TypeId::of::<P>();
-        if self.added_plugins.contains(&type_id) { return self }
-        self.added_plugins.insert(type_id);
+    pub fn add_plugin<P: Plugin + 'static>(mut self, plugin: P) -> Self {
+        if !self.added_plugins.insert(TypeId::of::<P>()) { return self }
         return plugin.build(self);
     }
 
-    /// Tick the primary schedule `rate` times per second, 0 runs it as fast as possible (default 60).
-    pub fn with_update_rate(mut self, rate: u32) -> Self {
-        self.primary_schedule_id.tick_rate = rate;
+    /// Run the update graph `rate` times per second, 0 runs it as fast as possible (default 60).
+    pub fn with_update_rate(self, rate: u32) -> Self {
+        self.add_resource(UpdateRate(rate))
+    }
+
+    /// Run the update graph on `threads` threads natively (default 4). Web always uses one.
+    pub fn with_update_threads(mut self, threads: usize) -> Self {
+        self.update_threads = threads.max(1);
         return self;
     }
 
     /// Cap rendering to `rate` frames per second, 0 renders as fast as possible (the default).
-    pub fn with_render_rate(mut self, rate: u32) -> Self {
-        self.render_schedule_id.tick_rate = rate;
-        return self;
+    pub fn with_render_rate(self, rate: u32) -> Self {
+        self.add_resource(RenderRate(rate))
     }
 
     /// Enable or disable vsync, off by default.
@@ -131,76 +154,106 @@ impl App {
     }
 
     /// Add a resource to this apps world.
-    pub fn add_resource<R: Resource + ResourceMeta + 'static>(self, resource: R) -> Self {
+    pub fn add_resource<R: Resource>(self, resource: R) -> Self {
         self.world.insert_resource(resource);
         return self;
     }
 
-    /// Add a system to run on startup of the primary schedule.
-    pub fn on_startup<S>(mut self, system: S) -> Self
-        where S: System<(), anyhow::Result<()>> + 'static
+    /// Add a system to run once before the first update.
+    pub fn on_startup<S, M>(self, system: S) -> Self
+        where S: IntoSystem<(), (), M> + 'static
     {
-        let tile = ScheduleTile::new(vec![Box::new(system)]);
-        self.primary_schedule.as_mut().unwrap().add_startup(tile);
+        self.on_startup_with(system, SystemInstruction::default())
+    }
+
+    /// Add a system to run once before the first update, ordered by `instruction`.
+    pub fn on_startup_with<S, M>(mut self, system: S, instruction: SystemInstruction) -> Self
+        where S: IntoSystem<(), (), M> + 'static
+    {
+        let result = self.startup.append_system(system, instruction, std::iter::empty());
+        self.record(result)
+    }
+
+    /// Add a system to run every update.
+    pub fn on_update<S, M>(self, system: S) -> Self
+        where S: IntoSystem<(), (), M> + 'static
+    {
+        self.on_update_with(system, SystemInstruction::default())
+    }
+
+    /// Add a system to run every update, ordered by `instruction`. Systems without an order
+    /// between them may run at the same time.
+    pub fn on_update_with<S, M>(mut self, system: S, instruction: SystemInstruction) -> Self
+        where S: IntoSystem<(), (), M> + 'static
+    {
+        let result = self.update.append_system(system, instruction, std::iter::empty());
+        self.record(result)
+    }
+
+    /// Add a system to run once before the first render frame, once [`Graphics`] exists.
+    pub fn on_render_startup<S, M>(self, system: S) -> Self
+        where S: IntoSystem<(), (), M> + 'static
+    {
+        self.on_render_startup_with(system, SystemInstruction::default())
+    }
+
+    /// Add a system to run once before the first render frame, ordered by `instruction`.
+    pub fn on_render_startup_with<S, M>(mut self, system: S, instruction: SystemInstruction) -> Self
+        where S: IntoSystem<(), (), M> + 'static
+    {
+        let result = self.render_startup.append_system(system, instruction, std::iter::empty());
+        self.record(result)
+    }
+
+    /// Add a system to run every render frame.
+    pub fn on_render_update<S, M>(self, system: S) -> Self
+        where S: IntoSystem<(), (), M> + 'static
+    {
+        self.on_render_update_with(system, SystemInstruction::default())
+    }
+
+    /// Add a system to run every render frame, ordered by `instruction`. The egui pass is open
+    /// for every system in the `Normal` pin (the default).
+    pub fn on_render_update_with<S, M>(mut self, system: S, instruction: SystemInstruction) -> Self
+        where S: IntoSystem<(), (), M> + 'static
+    {
+        let result = self.render.append_system(system, instruction, std::iter::empty());
+        self.record(result)
+    }
+
+    /// Keep the first error from appending a system, so `run` can return it.
+    fn record(mut self, result: anyhow::Result<()>) -> Self {
+        if let Err(err) = result { self.build_error.get_or_insert(err); }
         return self;
     }
 
-    /// Add a system to run on update of the primary schedule.
-    pub fn on_update<S>(mut self, system: S) -> Self
-        where S: System<(), anyhow::Result<()>> + 'static
-    {
-        let tile = ScheduleTile::new(vec![Box::new(system)]);
-        self.primary_schedule.as_mut().unwrap().add_new(tile);
-        return self;
-    }
-
-    /// Add a system to run on update of the render schedule.
-    pub fn on_render_startup<S>(self, system: S) -> Self
-        where S: System<RenderScheduleIn, anyhow::Result<RenderScheduleOut>> + 'static
-    {
-        let tile = ScheduleTile::new(vec![Box::new(system)]);
-        self.render_schedule.get_ref().add_startup(tile);
-        return self;
-    }
-
-    /// Add a system to run on update of the render schedule.
-    pub fn on_render_update<S>(self, system: S) -> Self
-        where S: System<RenderScheduleIn, anyhow::Result<RenderScheduleOut>> + 'static
-    {
-        let tile = ScheduleTile::new(vec![Box::new(system)]);
-        self.render_schedule.get_ref().add_new(tile);
-        return self;
-    }
-
-    /// Schedule the primary schedule and hand control over to the `winit` event loop. This
+    /// Start the primary schedule and hand control over to the `winit` event loop. This
     /// creates the window, drives resize/redraw events into the `App`, and blocks until the
     /// event loop exits.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first error from appending a system (a cycle or a contradicting pin), or
+    /// an error from the event loop.
     pub fn run(mut self) -> anyhow::Result<()> {
+        if let Some(err) = self.build_error.take() { return Err(err) }
+
         #[cfg(not(target_arch = "wasm32"))]
         {
             env_logger::init();
+            self.spawn_update_thread();
         }
         #[cfg(target_arch = "wasm32")]
         {
             console_log::init_with_level(log::Level::Info).unwrap();
         }
 
-        self.world.insert_resource(PrimaryScheduleID(self.primary_schedule_id));
-        self.world.insert_resource(RenderScheduleID(self.render_schedule_id));
-
-        // schedule primary schedule
-        Scheduler::schedule(
-            self.primary_schedule_id, 
-            self.primary_schedule.take().expect("Primary schedule was taken early"), 
-            self.world.clone()
-        );
-
         let event_loop = EventLoop::with_user_event().build()?;
         #[cfg(not(target_arch = "wasm32"))]
         {
             use crate::wrapper::AppWrapper;
 
-            let mut wrapper = AppWrapper { app: self, next_frame: None };
+            let mut wrapper = AppWrapper { app: self, render_pacer: Pacer::default() };
             event_loop.run_app(&mut wrapper)?;
         }
         #[cfg(target_arch = "wasm32")]
@@ -208,90 +261,143 @@ impl App {
             use winit::platform::web::EventLoopExtWebSys;
             use crate::wrapper::AppWrapper;
 
-            let wrapper = AppWrapper { app: self, next_frame: None };
+            let wrapper = AppWrapper { app: self, render_pacer: Pacer::default() };
             event_loop.spawn_app(wrapper);
         }
 
         Ok(())
     }
 
-    /// Reconfigure the GPU surface and [`WindowDimensions`] resource after a window resize.
-    pub(crate) fn resize(&mut self, width: u32, height: u32) {
-        let Some(mut vgpu) = self.world
-            .get_resource_mut::<Graphics>() 
-            else { return };
-        if width <= 0 || height <= 0 { return }
+    /// Move the startup and update graphs onto a thread that runs startup once, then runs
+    /// update at [`UpdateRate`] until the app exits.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn spawn_update_thread(&mut self) {
+        use std::sync::atomic::Ordering;
+        use anarchy::MultiThreadedExecutor;
 
-        vgpu.config_mut().width = width;
-        vgpu.config_mut().height = height;
-        vgpu.surface().configure(vgpu.device(), vgpu.config());
-        self.world().get_resource_mut::<WindowDimensions>().as_mut().unwrap().0 = UVec2::new(width, height);
+        let world = self.world.clone();
+        let startup = std::mem::take(&mut self.startup);
+        let update = std::mem::take(&mut self.update);
+        let running = Arc::clone(&self.running);
+        let threads = self.update_threads;
+
+        std::thread::spawn(move || {
+            let mut errors = ErrorLog::default();
+            errors.report("Startup", SingleThreadedExecutor::new().run(&world, &startup));
+
+            let exec = MultiThreadedExecutor::new();
+            // cleared, so each `run` call is a single pass and the pacing below decides when
+            // the next one starts
+            let single_pass = AtomicBool::new(false);
+            let mut pacer = Pacer::default();
+            while running.load(Ordering::Acquire) {
+                let rate = world.resource::<UpdateRate>().map(|rate| rate.0).unwrap_or(0);
+                if let Some(deadline) = pacer.too_early(rate) {
+                    std::thread::sleep((deadline - Utc::now()).to_std().unwrap_or_default());
+                    continue;
+                }
+                set_delta::<UpdateDeltaTime>(&world, pacer.start_pass());
+                errors.report("Update", exec.run(&world, &update, threads, &single_pass));
+            }
+        });
     }
 
-    /// Run one frame: begin a [`RenderFrame`], swap and execute the render schedule against
-    /// it, submit the frame, and record the render schedule's delta time.
-    pub(crate) fn render(&mut self) -> anyhow::Result<()> {
+    /// Run one update pass if one is due. Web has no threads, so the update graph is driven
+    /// from the render loop instead.
+    #[cfg(target_arch = "wasm32")]
+    fn tick_update(&mut self) {
+        let rate = self.world.resource::<UpdateRate>().map(|rate| rate.0).unwrap_or(0);
+        if self.update_pacer.too_early(rate).is_some() { return }
+
+        // startup is taken on the first pass, so it only runs once
+        let startup = std::mem::take(&mut self.startup);
+        let result = self.render_exec.run(&self.world, &startup);
+        self.update_errors.report("Startup", result);
+
+        set_delta::<UpdateDeltaTime>(&self.world, self.update_pacer.start_pass());
+        let result = self.render_exec.run(&self.world, &self.update);
+        self.update_errors.report("Update", result);
+    }
+
+    /// Reconfigure the GPU surface and [`WindowDimensions`] resource after a window resize.
+    pub(crate) fn resize(&mut self, width: u32, height: u32) {
+        configure_surface(&self.world, width, height);
+    }
+
+    /// Run one frame: begin a [`RenderFrame`], run the render graphs against it, submit the
+    /// frame, and record [`RenderDeltaTime`]. Returns false if the frame was skipped, because
+    /// [`Graphics`] doesn't exist yet or the surface can't be drawn to (e.g. the window is
+    /// hidden), in which case nothing has requested the next redraw.
+    pub(crate) fn render(&mut self) -> anyhow::Result<bool> {
         #[cfg(target_arch = "wasm32")]
-        Scheduler::tick_tasks();
-        
+        self.tick_update();
+
         // get start time and vgpu
         let start = Utc::now();
-        let Some(vgpu) = self.world
-            .get_resource_ref::<Graphics>() 
-            else { return Ok(()) };
-        
+        let Ok(vgpu) = self.world.resource::<Graphics>()
+            else { return Ok(false) };
+
         // start and insert `Frame`
         {
             let Some(frame) = RenderFrame::begin(&vgpu)?
-                else { return Ok(()) };
-            self.world.get_resource_mut::<Frame>()
-                .unwrap()
-                .store(frame);
+                else { return Ok(false) };
+            self.world.resource_mut::<Frame>()?.store(frame);
         }
-
-        // swap schedules then execute the previous one
-        let prev_schedule = CowData::new(Schedule::new_empty());
-        self.render_schedule().swap(&prev_schedule);
-        execute_schedule_sync(
-            &prev_schedule.get_ref(), 
-            &*self.render_schedule.get_ref(), 
-            self.render_schedule_id, 
-            &self.world, 
-            &()
-        );
-
-        let frame = {
-            self.world.get_resource_mut::<Frame>()
-                .unwrap()
-                .take()
-                .expect("Frame lost")
-        };
-
-        // finalize frame
-        frame.submit(&vgpu);
 
         // record delta time as the interval between frame starts, so it covers any time spent
         // waiting on the render rate cap or vsync and not just the work done this frame
         let previous = self.last_render.replace(start).unwrap_or(start);
         let deltatime = start.signed_duration_since(previous).to_std().map(|a| a.as_secs_f32()).unwrap_or(0.0);
-        if let Some(delta) = self.world.get_resource_ref::<DeltaTime>() {
-            delta.set(FlexLocalId::Schedule(self.render_schedule_id), deltatime);
-        }
+        set_delta::<RenderDeltaTime>(&self.world, deltatime);
 
-        Ok(())
+        if !self.render_started {
+            self.render_started = true;
+            let result = self.render_exec.run(&self.world, &self.render_startup);
+            self.render_errors.report("Render startup", result);
+        }
+        let result = self.render_exec.run(&self.world, &self.render);
+        self.render_errors.report("Render", result);
+
+        let frame = self.world.resource_mut::<Frame>()?
+            .take()
+            .expect("Frame lost");
+
+        // finalize frame
+        frame.submit(&vgpu);
+        Ok(true)
     }
 }
 
-#[system]
+/// Configure the GPU surface for a `width` by `height` window and update [`WindowDimensions`].
+/// Does nothing while either is 0 or before [`Graphics`] exists.
+pub(crate) fn configure_surface(world: &World, width: u32, height: u32) {
+    if width == 0 || height == 0 { return }
+    let Ok(mut vgpu) = world.resource_mut::<Graphics>() else { return };
+
+    vgpu.config_mut().width = width;
+    vgpu.config_mut().height = height;
+    vgpu.surface().configure(vgpu.device(), vgpu.config());
+    drop(vgpu);
+    if let Ok(mut dimensions) = world.resource_mut::<WindowDimensions>() {
+        dimensions.0 = UVec2::new(width, height);
+    }
+}
+
+/// Write `seconds` into the delta time resource `D`.
+fn set_delta<D: Resource + anarchy::ResourceMeta + std::ops::DerefMut<Target = f32>>(world: &World, seconds: f32) {
+    if let Ok(mut delta) = world.resource_mut::<D>() { **delta = seconds; }
+}
+
+/// Shows the update and render rates in an egui window, added by the `dbg-schedules` feature.
+#[allow(dead_code)]
 fn dbg_schedules(
     egui: Res<EguiCtx>,
-    delta_time: Res<DeltaTime>
+    update: Res<UpdateDeltaTime>,
+    render: Res<RenderDeltaTime>
 ) {
     Window::new("Schedules Debug").show(&egui.context, |ui| {
         ui.label("FPS Counters");
-        for (id, delta_time) in delta_time.iter_ref() {
-            let FlexLocalId::Schedule(schedule_id) = id else { continue };
-            ui.label(format!(" - {} -> {} FPS", schedule_id.id, 1.0 / *delta_time));
-        }
+        ui.label(format!(" - Update -> {} FPS", 1.0 / update.0));
+        ui.label(format!(" - Render -> {} FPS", 1.0 / render.0));
     });
 }

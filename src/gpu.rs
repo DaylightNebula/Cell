@@ -1,6 +1,6 @@
 use std::ops::{Deref, DerefMut};
 
-use anarchy::macros::Resource;
+use anarchy::Resource;
 use derive_more::{Deref, DerefMut};
 use magician_vgpu::{RenderFrame, VirtualGpu};
 
@@ -9,11 +9,23 @@ use magician_vgpu::{RenderFrame, VirtualGpu};
 #[derive(Resource, Deref, DerefMut)]
 pub struct Graphics(pub(crate) VirtualGpu);
 
+impl std::fmt::Debug for Graphics {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Graphics").finish_non_exhaustive()
+    }
+}
+
 /// Resource holding the `RenderFrame` currently in progress, if any. Populated at the start of
 /// each render frame and taken back out to be submitted once the render schedule has run;
 /// dereferencing while empty panics.
 #[derive(Resource, Default)]
 pub struct Frame(Option<RenderFrame>);
+
+impl std::fmt::Debug for Frame {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Frame").field("in_progress", &self.0.is_some()).finish()
+    }
+}
 
 impl Frame {
     /// Store the frame for the current render pass, replacing any previous one.

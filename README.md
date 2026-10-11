@@ -9,9 +9,11 @@ WGSL.
 
 `Cell` adds an `App` builder that:
 - owns an `anarchy` `World` and creates the `winit` window/event loop
-- runs a primary schedule on a fixed tick rate, independent of rendering
-- runs a render schedule once per frame (`RedrawRequested`), and submits the resulting `wgpu` frame
-- broadcasts `winit` window events into the ECS as `WindowEvent`
+- runs a primary update graph at a fixed tick rate (`UpdateRate`), independent of rendering and
+  on its own threads natively
+- runs a render graph once per frame (`RedrawRequested`), and submits the resulting `wgpu` frame
+- sends `winit` window and device events into the ECS as `WindowEvent` and `DeviceEvent`
+- tracks `UpdateDeltaTime` and `RenderDeltaTime`, and hands out entity ids through `spawn`
 - lets functionality be packaged and shared as `Plugin`s
 - optionally sets up an `egui` integration for debugging and simple in-app UI
 
@@ -20,17 +22,17 @@ WGSL.
 | Feature | Enables |
 |---|---|
 | `auto-egui` | Automatically adds `EguiPlugin` when `App::new()` is called. |
-| `dbg-schedules` | Implies `auto-egui`. Adds an egui window showing the FPS of every running schedule. |
+| `dbg-schedules` | Implies `auto-egui`. Adds an egui window showing the update and render FPS. |
 
 ## Usage
 
 ### Minimal app (no rendering UI)
 
 ```rust
-use anarchy::{ResMut, macros::{Resource, system}};
+use anarchy::{ResMut, Resource};
 use cell::App;
 
-#[derive(Resource)]
+#[derive(Debug, Resource)]
 struct Counter(u32);
 
 fn main() -> anyhow::Result<()> {
@@ -40,8 +42,7 @@ fn main() -> anyhow::Result<()> {
         .run()
 }
 
-#[system]
-fn tick(counter: ResMut<Counter>) {
+fn tick(mut counter: ResMut<Counter>) {
     counter.0 += 1;
     println!("tick {}", counter.0);
 }
@@ -50,10 +51,10 @@ fn tick(counter: ResMut<Counter>) {
 ### App with an egui debug window
 
 ```rust
-use anarchy::{Res, ResMut, macros::{Resource, system}};
+use anarchy::{Res, ResMut, Resource};
 use cell::{App, EguiCtx, EguiPlugin};
 
-#[derive(Resource)]
+#[derive(Debug, Resource)]
 pub struct TestData {
     speed: f32
 }
@@ -66,10 +67,9 @@ fn main() -> anyhow::Result<()> {
         .run()
 }
 
-#[system]
 fn on_render_update(
     egui: Res<EguiCtx>,
-    test_data: ResMut<TestData>
+    mut test_data: ResMut<TestData>
 ) {
     egui::Window::new("Debug").show(&egui.context, |ui| {
         ui.label("Hello from egui!");
@@ -98,6 +98,11 @@ impl Plugin for MyPlugin {
     }
 }
 ```
+
+Systems are plain functions whose parameters are `anarchy` system params (`World`, `Query`,
+`Res`, `ResMut`, `Event`, ...). Use the `_with` variants (`on_update_with`,
+`on_render_update_with`, ...) to order them with `before`, `after` or `pin`. The egui pass is
+open for every render system in the default `Normal` pin.
 
 Plugins are deduplicated by type: calling `add_plugin` twice with the same plugin type only
 builds it once.

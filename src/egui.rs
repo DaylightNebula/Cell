@@ -1,4 +1,4 @@
-use anarchy::{Event, EventSystemMinIDTracker, Res, ResMut, macros::{Resource, system}};
+use anarchy::{Event, Res, ResMut, Resource, SystemPin, World, pin};
 use magician_vgpu::{LoadOp, PassAttachment, PassTarget, StoreOp};
 
 use crate::{App, Frame, Graphics, Plugin, WindowEvent};
@@ -12,8 +12,8 @@ pub struct EguiPlugin;
 impl Plugin for EguiPlugin {
     fn build(self, app: App) -> App {
         app.on_render_startup(setup_egui)
-            .on_render_update(start_egui_frame)
-            .on_render_update(end_egui_frame)
+            .on_render_update_with(start_egui_frame, pin(SystemPin::Start))
+            .on_render_update_with(end_egui_frame, pin(SystemPin::End))
     }
 }
 
@@ -27,8 +27,14 @@ pub struct EguiCtx {
     pub renderer: egui_wgpu::Renderer
 }
 
-#[system]
+impl std::fmt::Debug for EguiCtx {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EguiCtx").finish_non_exhaustive()
+    }
+}
+
 fn setup_egui(
+    world: World,
     graphics: Res<Graphics>
 ) {
     // setup egui context, state, and renderer
@@ -51,31 +57,27 @@ fn setup_egui(
     });
 }
 
-static WINDOW_EVENT_TRACKER: EventSystemMinIDTracker = EventSystemMinIDTracker::new();
-
-// Runs first in the render schedule so the egui pass is open before any other render system.
-#[system(std::i32::MIN)]
+// Pinned to the start of the render schedule so the egui pass is open before any other render system.
 fn start_egui_frame(
     graphics: Res<Graphics>,
-    ctx: ResMut<EguiCtx>,
-    frame: ResMut<Frame>,
+    mut ctx: ResMut<EguiCtx>,
     window_events: Event<WindowEvent>
 ) {
-    for event in window_events.read(&WINDOW_EVENT_TRACKER) {
-        let _ = ctx.state.on_window_event(graphics.window(), &**event);
+    for event in window_events.read() {
+        let _ = ctx.state.on_window_event(graphics.window(), &event);
     }
     
     let raw_input = ctx.state.take_egui_input(graphics.window());
     ctx.context.begin_pass(raw_input);
 }
 
-// Runs last in the render schedule so it captures UI drawn by every other render system.
-#[system(std::i32::MAX)]
+// Pinned to the end of the render schedule so it captures UI drawn by every other render system.
 fn end_egui_frame(
     graphics: Res<Graphics>,
-    ctx: ResMut<EguiCtx>,
-    frame: ResMut<Frame>,
+    mut ctx: ResMut<EguiCtx>,
+    mut frame: ResMut<Frame>,
 ) {
+    let ctx = &mut *ctx;
     let full_output = ctx.context.end_pass();
     ctx.state.handle_platform_output(graphics.window(), full_output.platform_output);
 
